@@ -1,0 +1,4 @@
+.env
+rss_data.db
+__pycache__/
+*.pyc
