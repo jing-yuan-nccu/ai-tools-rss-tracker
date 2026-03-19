@@ -8,9 +8,11 @@ import sys
 import io
 import feedparser
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from bs4 import BeautifulSoup
+
+RETENTION_DAYS = 7
 
 # 修正 Windows 終端機中文顯示問題
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -151,6 +153,19 @@ def fetch_feed(feed_key: str, feed_cfg: dict, conn: sqlite3.Connection) -> dict:
     return result
 
 
+def purge_old_articles(conn: sqlite3.Connection):
+    """刪除超過 RETENTION_DAYS 天的舊文章，縮小資料庫"""
+    cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).isoformat()
+    cursor = conn.execute(
+        "DELETE FROM articles WHERE fetched_at < ?", (cutoff,)
+    )
+    deleted = cursor.rowcount
+    if deleted:
+        conn.execute("VACUUM")
+        conn.commit()
+        print(f"  清理 {deleted} 筆超過 {RETENTION_DAYS} 天的舊資料")
+
+
 def fetch_all():
     """抓取所有 feeds 並存入資料庫"""
     print("=" * 50)
@@ -159,6 +174,9 @@ def fetch_all():
 
     with sqlite3.connect(DB_PATH) as conn:
         init_db(conn)
+
+        # 清理過期資料
+        purge_old_articles(conn)
 
         summary = {}
         for key, cfg in FEEDS.items():
