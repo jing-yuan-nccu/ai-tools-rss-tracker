@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 from notion_client import Client
 from notion_client.errors import APIResponseError
 from dotenv import load_dotenv
@@ -105,10 +106,51 @@ def push_article(row: tuple) -> bool:
         return False
 
 
+def fetch_notion_urls() -> set:
+    """從 Notion 資料庫撈出所有已存在的 URL，用於去重"""
+    token = os.getenv("NOTION_TOKEN")
+    db_id = NOTION_DB
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+    urls = set()
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        body = {"page_size": 100}
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+        resp = httpx.post(
+            f"https://api.notion.com/v1/databases/{db_id}/query",
+            headers=headers, json=body,
+        )
+        data = resp.json()
+        if resp.status_code != 200:
+            print(f"  查詢 Notion 失敗: {data}")
+            break
+        for page in data["results"]:
+            url = page["properties"].get("URL", {}).get("url", "")
+            if url:
+                urls.add(url)
+        has_more = data.get("has_more", False)
+        start_cursor = data.get("next_cursor")
+
+    return urls
+
+
 def push_all():
     print("=" * 50)
     print(f"推送至 Notion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 50)
+
+    # 先取得 Notion 已有的 URL 做去重
+    print("正在查詢 Notion 已有資料...")
+    existing_urls = fetch_notion_urls()
+    print(f"Notion 已有 {len(existing_urls)} 筆資料")
 
     with sqlite3.connect(DB_PATH) as conn:
         init_pushed_column(conn)
@@ -122,12 +164,25 @@ def push_all():
 
         print(f"待推送文章：{len(rows)} 筆")
 
-        success = 0
-        fail    = 0
+        success  = 0
+        fail     = 0
+        skipped  = 0
 
         for row in rows:
             article_id = row[0]
-            title      = row[3]  # id, feed_key, feed_name, title, ...
+            title      = row[3]
+            link       = row[4]
+
+            # 去重：如果 URL 已在 Notion 中，標記為已推送並跳過
+            if link and link in existing_urls:
+                conn.execute(
+                    "UPDATE articles SET notion_pushed = 1 WHERE id = ?",
+                    (article_id,)
+                )
+                conn.commit()
+                skipped += 1
+                continue
+
             print(f"  推送: {title[:60]}...")
 
             if push_article(row):
@@ -136,12 +191,13 @@ def push_all():
                     (article_id,)
                 )
                 conn.commit()
+                existing_urls.add(link)  # 加入集合避免同批次重複
                 success += 1
             else:
                 fail += 1
 
     print()
-    print(f"完成：成功 {success} 筆 / 失敗 {fail} 筆")
+    print(f"完成：成功 {success} 筆 / 跳過（已存在） {skipped} 筆 / 失敗 {fail} 筆")
     print("=" * 50)
 
 

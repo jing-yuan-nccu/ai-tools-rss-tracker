@@ -3,12 +3,14 @@ RSS Tracker - 追蹤 AI 工具更新資訊
 目標來源：Codex, Claude (Anthropic), OpenCode, OpenClaw
 """
 
+import re
 import sys
 import io
 import feedparser
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 # 修正 Windows 終端機中文顯示問題
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -66,6 +68,20 @@ def init_db(conn: sqlite3.Connection):
     conn.commit()
 
 
+def clean_html(raw_html: str) -> str:
+    """將 HTML 轉為乾淨的純文字"""
+    if not raw_html:
+        return ""
+    soup = BeautifulSoup(raw_html, "html.parser")
+    # 在 block 元素前後加換行，讓文字結構保留
+    for tag in soup.find_all(["p", "br", "h1", "h2", "h3", "h4", "li", "tr", "div"]):
+        tag.insert_before("\n")
+    text = soup.get_text()
+    # 清理多餘空白行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def parse_published(entry) -> str:
     """統一轉換發布時間為 ISO 格式字串"""
     if hasattr(entry, "published_parsed") and entry.published_parsed:
@@ -95,13 +111,17 @@ def fetch_feed(feed_key: str, feed_cfg: dict, conn: sqlite3.Connection) -> dict:
         for entry in parsed.entries:
             title     = getattr(entry, "title", "(無標題)")
             link      = getattr(entry, "link", "")
-            summary   = getattr(entry, "summary", "")
+            raw_summary = getattr(entry, "summary", "")
             published = parse_published(entry)
 
             # content 欄位通常比 summary 有更完整的內容
-            content = ""
+            raw_content = ""
             if hasattr(entry, "content") and entry.content:
-                content = entry.content[0].get("value", "")
+                raw_content = entry.content[0].get("value", "")
+
+            # 清洗 HTML，存入乾淨純文字
+            summary = clean_html(raw_summary)
+            content = clean_html(raw_content)
 
             try:
                 conn.execute("""
